@@ -1,0 +1,14 @@
+# Datos y bases de datos locales (no se suben al repositorio)
+datos/
+*.db
+*.sql.gz
+*Dump*.sql
+
+# Credenciales
+.env
+credentials.json
+token.json
+
+# Jupyter y Python
+.ipynb_checkpoints/
+__pycache__/
