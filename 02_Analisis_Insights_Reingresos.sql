@@ -18,6 +18,20 @@ USE dm_cardiologia;
 
 
 -- ---------------------------------------------------------------------
+-- Control de calidad: ¿hay episodios duplicados (mismo paciente y mismas fechas)?
+-- ---------------------------------------------------------------------
+SELECT COUNT(*)          AS episodios_duplicados,   -- 1.238
+       SUM(n)            AS filas_implicadas,
+       SUM(n) - COUNT(*) AS filas_sobrantes          -- 1.271
+FROM (
+    SELECT id_paciente, fecha_admision, fecha_alta, COUNT(*) AS n
+    FROM admisiones
+    GROUP BY id_paciente, fecha_admision, fecha_alta
+    HAVING COUNT(*) > 1
+) AS dup;
+
+
+-- ---------------------------------------------------------------------
 -- 0. Vista de admisiones sin duplicados y con el siguiente ingreso
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW admisiones_limpias AS
@@ -80,6 +94,18 @@ ORDER BY ingresos;
 -- ¿cuántos ingresos tiene de media cada paciente? | fácil
 SELECT ROUND(COUNT(*) / COUNT(DISTINCT id_paciente), 3) AS ingresos_por_paciente
 FROM admisiones_limpias;
+
+
+-- ¿cuál es la media de reingresos de los pacientes que han tenido reingresos? | media | subconsultas
+-- Aquí "reingreso" es cualquier ingreso posterior; el primer ingreso no cuenta (de ahí el - 1)
+SELECT ROUND(AVG(ingresos - 1), 2) AS media_reingresos,
+       COUNT(*)                    AS pacientes_con_reingreso
+FROM (
+    SELECT id_paciente, COUNT(*) AS ingresos
+    FROM admisiones_limpias
+    GROUP BY id_paciente
+    HAVING COUNT(*) > 1
+) AS reingresadores;
 
 
 -- ¿cuánto tiempo pasa de media entre un alta y el siguiente ingreso? | avanzada | window functions (en la vista)
