@@ -32,6 +32,7 @@ La primera versión del proyecto se revisó a fondo. Las correcciones más impor
 - **Escala estable**: la nota de 0 a 10 dependía de los pacientes de cada carga; ahora usa el rango teórico del scorecard, fijo.
 - **Validación**: el scorecard se medía con los mismos datos con que se construía; ahora se evalúa en un periodo de prueba.
 - **Seguridad**: la contraseña de la base de datos ya no está en el código.
+- **Consultas SQL**: los archivos `.sql` tenían los mismos fallos (duplicados, reingreso como «cualquier ingreso posterior», meses de dos años mezclados). Ahora trabajan sobre una vista sin duplicados (`admisiones_limpias`) y dan las mismas cifras que el notebook: 13.767 episodios reales y un 4,48 % de reingresos a 30 días (544 de 12.156 altas evaluables).
 
 El detalle de todas las correcciones está al principio del notebook.
 

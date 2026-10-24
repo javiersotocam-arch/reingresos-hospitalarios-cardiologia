@@ -1,214 +1,191 @@
-use dm_cardiologia;
+-- =====================================================================
+-- Reingresos hospitalarios en cardiología: análisis de la situación en SQL
+-- Base de datos: dm_cardiologia (MySQL 8)
+--
+-- Revisión (octubre 2026). Las mismas correcciones que en el notebook:
+--   1. 1.238 episodios están registrados más de una vez (mismo paciente,
+--      misma fecha de ingreso y de alta). Todas las consultas trabajan sobre
+--      la vista admisiones_limpias, que deja una sola copia de cada episodio.
+--   2. Reingreso = nuevo ingreso en los 30 días siguientes al alta (indicador
+--      estándar), no "cualquier ingreso posterior", aunque fuera años después.
+--   3. Las altas de los últimos 30 días de datos no tienen seguimiento completo
+--      (no sabemos si reingresan) y se excluyen al calcular la tasa.
+--   4. Los meses se agrupan por año y mes: los datos cubren dos años
+--      (abril 2022 - marzo 2024) y agrupar solo por mes juntaba los dos.
+-- =====================================================================
+
+USE dm_cardiologia;
 
 
-# ¿cuántas admisiones hay de media por mes? | fácil | subconsultas
+-- ---------------------------------------------------------------------
+-- 0. Vista de admisiones sin duplicados y con el siguiente ingreso
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE VIEW admisiones_limpias AS
+WITH numeradas AS (
+    SELECT a.*,
+           ROW_NUMBER() OVER (PARTITION BY id_paciente, fecha_admision, fecha_alta
+                              ORDER BY id_admision) AS copia
+    FROM admisiones a
+)
+SELECT id_admision, id_paciente, fecha_admision, fecha_alta, tipo_admision,
+       duracion_estancia, duracion_estancia_ci, resultado,
+       -- días desde el alta anterior del mismo paciente (NULL si es su primer ingreso)
+       DATEDIFF(fecha_admision,
+                LAG(fecha_alta) OVER (PARTITION BY id_paciente ORDER BY fecha_admision, id_admision))
+           AS dias_desde_alta_anterior,
+       -- días hasta el siguiente ingreso del mismo paciente (NULL si no vuelve)
+       DATEDIFF(LEAD(fecha_admision) OVER (PARTITION BY id_paciente ORDER BY fecha_admision, id_admision),
+                fecha_alta)
+           AS dias_hasta_siguiente_ingreso
+FROM numeradas
+WHERE copia = 1;
 
-select
-	avg(total_admisiones) as media_total_admisiones
-from
-	(
-    select
-		month(fecha_admision) as mes,
-        count(*) as total_admisiones
-        from admisiones
-        group by mes    
-    )as admisiones_por_mes;
-    
-
-# ¿y cuántos pacientes únicos de media por mes? | fácil | subconsultas
-
-select
-	avg(total_pacientes) as media_total_pacientes
-from
-	(
-    select
-		month(fecha_admision) as mes,
-        count(distinct id_paciente) as total_pacientes
-        from admisiones
-        group by mes    
-    )as pacientes_por_mes;
-
-
-# ¿qué porcentaje de pacientes tienen más de un ingreso? | media | subconsultas
-select
-	(sum(case when total_reingresos > 1 then 1 else 0 end) * 100.0 / count(distinct id_paciente)) as porcentaje_reingresos
-from (
-	select id_paciente, count(*) as total_reingresos
-	from admisiones
-	group by id_paciente) as pacientes;
+-- Comprobación: 15.038 registros originales, 13.767 episodios reales
+SELECT (SELECT COUNT(*) FROM admisiones)         AS registros_originales,
+       (SELECT COUNT(*) FROM admisiones_limpias) AS episodios_reales;
 
 
-
-# ¿cual es el tiempo promedio entre una admisión y el siguiente reingreso? | avanzada | subconsultas | window functions
-SELECT
-	avg(dias_reingreso) as tiempo_promedio_global_reingreso
-from(
-	select
-		id_paciente,
-        datediff(lead(fecha_admision) over (partition by id_paciente order by fecha_admision), fecha_admision) as dias_reingreso
-	from admisiones) as diferencias
-where dias_reingreso is not null;
-
-
-# ¿cuántas veces ingresan los pacientes? (cuántos pacientes una vez, cuántos 2 veces, etc) | media | subconsultas
-select
-	total_ingresos, count(*) as num_pacientes
-from (
-	select id_paciente, count(*) as total_ingresos
-    from admisiones
-    group by id_paciente) as ingresos_por_paciente
-group by total_ingresos
-order by total_ingresos;
+-- ¿cuántas admisiones y pacientes únicos hay de media por mes? | fácil | subconsultas
+SELECT ROUND(AVG(admisiones), 1) AS media_admisiones_mes,
+       ROUND(AVG(pacientes), 1)  AS media_pacientes_mes
+FROM (
+    SELECT DATE_FORMAT(fecha_admision, '%Y-%m') AS mes,
+           COUNT(*)                    AS admisiones,
+           COUNT(DISTINCT id_paciente) AS pacientes
+    FROM admisiones_limpias
+    GROUP BY mes
+) AS por_mes;
 
 
-
-# ¿cual es la media de ingresos de todos los pacientes? | avanzada | ctes
-
-with ingresos_por_paciente as (
-	select id_paciente, count(*) as total_ingresos
-    from admisiones
-    group by id_paciente),
-    distribucion_ingresos as (
-    select total_ingresos, count(*) as num_pacientes
-    from ingresos_por_paciente
-    group by total_ingresos)
-select 
-sum(total_ingresos * num_pacientes) * 1.0 / sum(num_pacientes) as media_ponderada
-from distribucion_ingresos;
+-- ¿qué porcentaje de pacientes tiene más de un ingreso? | media | subconsultas
+SELECT ROUND(100 * AVG(ingresos > 1), 2) AS pct_pacientes_mas_de_un_ingreso
+FROM (
+    SELECT id_paciente, COUNT(*) AS ingresos
+    FROM admisiones_limpias
+    GROUP BY id_paciente
+) AS por_paciente;
 
 
-# ¿cual es la media de reingresos de los pacientes que han tenido reingresos? | media | subconsultas
-select
-	avg(total_reingresos) as media_reingresos
-from (
-	select
-		id_paciente,
-        count(*) - 1 as total_reingresos
-	from admisiones
-    group by id_paciente
-    having count(*) > 1)
-as reingresos_por_paciente;
+-- ¿cuántas veces ingresan los pacientes? | media | subconsultas
+SELECT ingresos, COUNT(*) AS pacientes
+FROM (
+    SELECT id_paciente, COUNT(*) AS ingresos
+    FROM admisiones_limpias
+    GROUP BY id_paciente
+) AS por_paciente
+GROUP BY ingresos
+ORDER BY ingresos;
 
 
+-- ¿cuántos ingresos tiene de media cada paciente? | fácil
+SELECT ROUND(COUNT(*) / COUNT(DISTINCT id_paciente), 3) AS ingresos_por_paciente
+FROM admisiones_limpias;
 
 
-# ¿cuántos días de hospitalización supusieron los reingresos en el último año que tengamos completo? | media | subconsultas
-select 
-	sum(duracion_estancia) as total_dias_reingresos
-    from admisiones
-where id_paciente in(
-	select id_paciente
-    from admisiones	
-    group by id_paciente
-    having count(*) > 1)
-and year(fecha_admision) = 2023;
+-- ¿cuánto tiempo pasa de media entre un alta y el siguiente ingreso? | avanzada | window functions (en la vista)
+-- Se mide desde el alta, no desde el ingreso anterior, y sin ingresos solapados
+SELECT ROUND(AVG(dias_hasta_siguiente_ingreso), 1)  AS media_dias,
+       COUNT(*)                                     AS altas_con_nuevo_ingreso
+FROM admisiones_limpias
+WHERE dias_hasta_siguiente_ingreso >= 0;
 
 
+-- ¿qué porcentaje de altas termina en un reingreso en los 30 días siguientes? | pro | ctes
+-- Se excluyen las defunciones (no pueden reingresar) y las altas sin 30 días de seguimiento
+WITH altas_evaluables AS (
+    SELECT id_admision,
+           dias_hasta_siguiente_ingreso BETWEEN 0 AND 30 AS reingresa_30d
+    FROM admisiones_limpias
+    WHERE resultado <> 'Defuncion'
+      AND fecha_alta <= (SELECT MAX(fecha_admision) FROM admisiones_limpias) - INTERVAL 30 DAY
+)
+SELECT COUNT(*)                                          AS altas_evaluables,
+       SUM(COALESCE(reingresa_30d, 0))                   AS altas_con_reingreso_30d,
+       ROUND(100 * AVG(COALESCE(reingresa_30d, 0)), 2)   AS pct_reingreso_30d
+FROM altas_evaluables;
 
 
-
-# ¿cual es la duración promedio de la estancia de los pacientes que reingresan frente a los que no reingresan? | avanzada | ctes
-with tipo_ingreso as(
-	select
-		id_paciente,
-        duracion_estancia,
-		case when id_paciente in(
-				select id_paciente
-                from admisiones
-                group by id_paciente
-                having count(*) > 1)
-			then 'reingreso'
-            else 'no_reingreso'
-		end as tipo_ingreso
-        from admisiones
-        )
-select 
-	tipo_ingreso,
-    avg(duracion_estancia) as duracion_promedio_estancia
-from tipo_ingreso
-group by tipo_ingreso;
-
-
-
-
+-- ¿cómo cambia la tasa de reingreso a 30 días según la definición? | pro | ctes
+-- Muestra por qué la tasa original estaba inflada
+WITH originales AS (
+    -- definición original: hay otro registro posterior del mismo paciente,
+    -- aunque sea una copia duplicada del mismo episodio
+    SELECT a.resultado,
+           LEAD(a.id_paciente) OVER (PARTITION BY a.id_paciente ORDER BY a.fecha_admision, a.id_admision)
+               IS NOT NULL AS tiene_registro_posterior
+    FROM admisiones a
+)
+SELECT 'Cualquier ingreso posterior, con duplicados' AS definicion,
+       ROUND(100 * AVG(tiene_registro_posterior), 2) AS pct
+FROM originales WHERE resultado <> 'Defuncion'
+UNION ALL
+SELECT 'Cualquier ingreso posterior, sin duplicados',
+       ROUND(100 * AVG(COALESCE(dias_hasta_siguiente_ingreso >= 0, 0)), 2)
+FROM admisiones_limpias WHERE resultado <> 'Defuncion'
+UNION ALL
+SELECT 'Reingreso a 30 días, sin duplicados y con seguimiento completo',
+       ROUND(100 * AVG(COALESCE(dias_hasta_siguiente_ingreso BETWEEN 0 AND 30, 0)), 2)
+FROM admisiones_limpias
+WHERE resultado <> 'Defuncion'
+  AND fecha_alta <= (SELECT MAX(fecha_admision) FROM admisiones_limpias) - INTERVAL 30 DAY;
 
 
-
-# ¿qué porcentaje de pacientes con reingreso terminan falleciendo? | pro | ctes
-with pacientes_con_reingreso as(
-		select id_paciente
-		from admisiones
-		group by id_paciente
-		having count(*) >1),
-    total_pacientes_con_reingreso as (
-		select count(*) as total_pacientes_con_reingreso
-		from pacientes_con_reingreso),
-    fallecidos_con_reingreso as (
-		select count(*) as total_fallecidos_con_reingreso
-        from admisiones
-        where resultado = 'Defuncion'
-			and id_paciente in (
-				select id_paciente from pacientes_con_reingreso
-			))
-select 
-	(num.total_fallecidos_con_reingreso * 100.0 / denom.total_pacientes_con_reingreso) as porc_fallecidos_reingreso
-   
-from fallecidos_con_reingreso num,
-	total_pacientes_con_reingreso denom;
-    
+-- ¿cuántos días de hospitalización suponen los reingresos a 30 días y cuánto cuestan? | media
+-- Solo cuentan las estancias de los reingresos, no los primeros ingresos de esos pacientes.
+-- Coste: estimación de 700 € por día de hospitalización.
+SELECT CASE WHEN fecha_admision < '2023-04-01' THEN 'abr 2022 - mar 2023' ELSE 'abr 2023 - mar 2024' END AS periodo,
+       COUNT(*)                          AS reingresos_30d,
+       SUM(duracion_estancia)            AS dias_hospitalizacion,
+       SUM(duracion_estancia) * 700      AS coste_estimado_eur
+FROM admisiones_limpias
+WHERE dias_desde_alta_anterior BETWEEN 0 AND 30
+GROUP BY periodo WITH ROLLUP;
 
 
-# ¿cual es el promedio de edad de los pacientes que fallecen? | fácil | joins
-select 
-	avg(p.edad) as edad_promedio_fallecidos
-from pacientes p join admisiones a on p.id_admision = a.id_admision
-where a.resultado = 'Defuncion';
+-- ¿las altas que acaban en reingreso tuvieron estancias más largas? | avanzada | ctes
+-- Se compara por alta (cada ingreso), no por paciente
+WITH altas_evaluables AS (
+    SELECT duracion_estancia,
+           CASE WHEN dias_hasta_siguiente_ingreso BETWEEN 0 AND 30
+                THEN 'reingresa en 30 días' ELSE 'no reingresa' END AS grupo
+    FROM admisiones_limpias
+    WHERE resultado <> 'Defuncion'
+      AND fecha_alta <= (SELECT MAX(fecha_admision) FROM admisiones_limpias) - INTERVAL 30 DAY
+)
+SELECT grupo, COUNT(*) AS altas, ROUND(AVG(duracion_estancia), 2) AS estancia_media_dias
+FROM altas_evaluables
+GROUP BY grupo;
 
 
+-- ¿qué porcentaje de pacientes con algún reingreso a 30 días acaba falleciendo? | pro | ctes
+WITH con_reingreso AS (
+    SELECT DISTINCT id_paciente
+    FROM admisiones_limpias
+    WHERE dias_desde_alta_anterior BETWEEN 0 AND 30
+),
+fallecidos AS (
+    SELECT DISTINCT id_paciente
+    FROM admisiones_limpias
+    WHERE resultado = 'Defuncion'
+)
+SELECT COUNT(*)                                       AS pacientes_con_reingreso_30d,
+       COUNT(f.id_paciente)                           AS de_ellos_fallecidos,
+       ROUND(100 * COUNT(f.id_paciente) / COUNT(*), 2) AS pct_fallecidos
+FROM con_reingreso c
+LEFT JOIN fallecidos f ON f.id_paciente = c.id_paciente;
 
 
-# ¿fallecen proporcionalmente el mismo número de hombres y mujeres? | media | joins
-select 
-	p.genero,
-    sum(case when a.resultado = 'Defuncion' then 1 else 0 end) * 100.0 / count(*) as porcentaje_fallecidos
-from pacientes p join admisiones a on p.id_admision = a.id_admision
-group by p.genero;
+-- ¿cuál es la edad media de los pacientes que fallecen? | fácil | joins
+SELECT ROUND(AVG(p.edad), 1) AS edad_media_fallecidos
+FROM admisiones_limpias a
+JOIN pacientes p ON p.id_admision = a.id_admision
+WHERE a.resultado = 'Defuncion';
 
 
-
-
-
-# ¿cual es el porcentaje de altas que terminan teniendo un reingreso dentro de los 30 días siguientes al alta? | pro | ctes | joins
-with altas as (
-	select
-		id_paciente,
-        id_admision,
-        fecha_alta,
-        resultado
-	   from admisiones
-	   where resultado != 'Defuncion'),
-    total_altas as(
-		select count(*) as total_altas
-        from altas),
-	reingresos_en_30_dias as (
-		select
-			a1.id_paciente,
-            a1.id_admision as alta_id_admision,
-            a2.id_admision as reingreso_id_admision,
-            a1.fecha_alta,
-            a2.fecha_admision
-        from altas a1 join admisiones a2 on a1.id_paciente = a2.id_paciente
-			and a2.fecha_admision > a1.fecha_alta
-            and datediff(a2.fecha_admision, a1.fecha_alta) <= 30),
-		total_reingresos_en_30_dias as (
-			select count(alta_id_admision) as total_reingresos_en_30_dias
-			from reingresos_en_30_dias)
- select 
-	round((num.total_reingresos_en_30_dias * 100.0 / denom.total_altas),2) as porc_reingresos_30_dias
- from total_reingresos_en_30_dias num, total_altas denom;
-            
-        
-
-
-
-
+-- ¿fallecen proporcionalmente igual hombres y mujeres? | media | joins
+SELECT p.genero,
+       COUNT(*)                                          AS ingresos,
+       ROUND(100 * AVG(a.resultado = 'Defuncion'), 2)    AS pct_ingresos_con_defuncion
+FROM admisiones_limpias a
+JOIN pacientes p ON p.id_admision = a.id_admision
+GROUP BY p.genero;

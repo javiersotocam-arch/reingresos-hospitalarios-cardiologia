@@ -1,53 +1,52 @@
-use dm_cardiologia;
+-- =====================================================================
+-- Reingresos hospitalarios en cardiología: indicadores generales
+-- Revisión (octubre 2026): se usa la vista admisiones_limpias (creada en
+-- 02_Analisis_Insights_Reingresos.sql), sin los 1.238 episodios duplicados.
+-- Ejecuta primero el bloque 0 de ese archivo.
+-- =====================================================================
 
-#Cantidad de pacientes y admisiones
-SELECT 
-    COUNT(DISTINCT id_paciente) AS total_pacientes,
-    COUNT(DISTINCT id_admision) AS total_admisiones
-FROM admisiones;
+USE dm_cardiologia;
 
 
-#Distribución por género
-SELECT 
-    genero,
-    COUNT(*) AS total_pacientes
-FROM pacientes
+-- Pacientes, registros y episodios reales
+SELECT COUNT(DISTINCT id_paciente)                  AS pacientes,
+       (SELECT COUNT(*) FROM admisiones)            AS registros_originales,
+       COUNT(*)                                     AS episodios_reales
+FROM admisiones_limpias;
+
+
+-- Distribución por género (pacientes distintos, con el género de su primer ingreso)
+SELECT genero, COUNT(*) AS pacientes
+FROM (
+    SELECT p.id_paciente, p.genero,
+           ROW_NUMBER() OVER (PARTITION BY p.id_paciente ORDER BY a.fecha_admision) AS n
+    FROM admisiones_limpias a
+    JOIN pacientes p ON p.id_admision = a.id_admision
+) t
+WHERE n = 1
 GROUP BY genero;
 
 
-#Promedio de edad de los pacientes
-SELECT 
-    AVG(edad) AS edad_promedio
-FROM pacientes;
+-- Edad media al ingreso
+SELECT ROUND(AVG(p.edad), 1) AS edad_media
+FROM admisiones_limpias a
+JOIN pacientes p ON p.id_admision = a.id_admision;
 
 
-#Duración promedio de la estancia hospitalaria
-SELECT 
-    AVG(duracion_estancia) AS duracion_promedio_estancia
-FROM admisiones;
+-- Duración media de la estancia (días)
+SELECT ROUND(AVG(duracion_estancia), 2) AS estancia_media
+FROM admisiones_limpias;
 
 
-#Distribución de tipos de admisión
-SELECT 
-    tipo_admision,
-    COUNT(*) AS total_admisiones
-FROM admisiones
+-- Distribución por tipo de admisión
+SELECT tipo_admision, COUNT(*) AS ingresos,
+       ROUND(100 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct
+FROM admisiones_limpias
 GROUP BY tipo_admision;
 
 
-#Porcentaje de Mortalidad
-SELECT 
-    fallecidos.total_fallecidos,
-    pacientes.total_pacientes,
-    (fallecidos.total_fallecidos * 100.0 / pacientes.total_pacientes) AS porcentaje_mortalidad
-FROM 
-    (SELECT COUNT(*) AS total_fallecidos
-     FROM admisiones
-     WHERE resultado = 'Defuncion') AS fallecidos,
-    (SELECT COUNT(DISTINCT id_paciente) AS total_pacientes
-     FROM admisiones) AS pacientes;
-     
-     
-
-
-
+-- Mortalidad: por ingreso y por paciente (son indicadores distintos)
+SELECT ROUND(100 * AVG(resultado = 'Defuncion'), 2)                     AS pct_ingresos_con_defuncion,
+       ROUND(100 * COUNT(DISTINCT CASE WHEN resultado = 'Defuncion' THEN id_paciente END)
+                 / COUNT(DISTINCT id_paciente), 2)                       AS pct_pacientes_fallecidos
+FROM admisiones_limpias;
